@@ -7736,7 +7736,13 @@ def test_listing_during_stalled_put():
     t.join()
 
     head = client.head_object(Bucket=bucket_name, Key=key)
-    listed = [o for o in client.list_objects_v2(Bucket=bucket_name)['Contents'] if o['Key'] == key]
+    # the index completion is asynchronous, so give the listing a moment
+    for _ in range(20):
+        listed = [o for o in client.list_objects_v2(Bucket=bucket_name).get('Contents', [])
+                  if o['Key'] == key]
+        if len(listed) == 1 and listed[0]['ETag'] == head['ETag']:
+            break
+        time.sleep(0.5)
     assert len(listed) == 1
     assert listed[0]['ETag'] == head['ETag'], 'the listing shows a write the head no longer holds'
     assert listed[0]['Size'] == head['ContentLength']
