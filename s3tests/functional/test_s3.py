@@ -21162,6 +21162,45 @@ def test_versioned_put_object_if_none_match_racing():
     second.join()
     assert list(results.values()).count(200) == 1, 'answers: {}'.format(results)
 
+@pytest.mark.rgw_inject
+@pytest.mark.conditional_write
+@pytest.mark.fails_on_aws
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+def test_versioned_put_object_if_match_racing():
+    # Two clients replace an object with If-Match on the same ETag in a
+    # versioned bucket. Each checks the ETag against the current version,
+    # then waits before its head write; when the second makes its version
+    # current, the version it checked is no longer current. S3 refuses it
+    # 412, or 409 ConditionalRequestConflict. RGW writes each to a new
+    # version with no guard, so both succeed.
+    delay = _require_inject_delay('write_meta_before_head_write')
+    bucket = get_new_bucket()
+    check_configure_versioning_retry(bucket, "Enabled", "Enabled")
+    key = 'obj'
+    etag = _patient_client(delay).put_object(Bucket=bucket, Key=key, Body='v0')['ETag']
+    cfg = botocore.config.Config(signature_version='s3v4', read_timeout=delay + 60,
+                                 retries={'total_max_attempts': 1})
+    results = {}
+    def put(name):
+        try:
+            get_client(cfg).put_object(Bucket=bucket, Key=key, Body=name, IfMatch=etag)
+            results[name] = 200
+        except ClientError as e:
+            results[name] = _get_status_and_error_code(e.response)
+    first = threading.Thread(target=put, args=('first',))
+    first.start()
+    time.sleep(delay / 2)
+    second = threading.Thread(target=put, args=('second',))
+    second.start()
+    first.join()
+    second.join()
+
+    assert results['first'] == 200
+    assert results['second'] in ((412, 'PreconditionFailed'), (409, 'ConditionalRequestConflict')), \
+        'answers: {}'.format(results)
+    assert _get_body(get_client().get_object(Bucket=bucket, Key=key)) == 'first'
+
 # S3 APIs that RGW does not implement. RGW dispatches on the query
 # arguments it knows and otherwise runs the plain bucket or object
 # operation, so these calls run as another operation and answer success.
