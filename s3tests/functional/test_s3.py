@@ -21161,3 +21161,84 @@ def test_versioned_put_object_if_none_match_racing():
     first.join()
     second.join()
     assert list(results.values()).count(200) == 1, 'answers: {}'.format(results)
+
+# S3 APIs that RGW does not implement. RGW dispatches on the query
+# arguments it knows and otherwise runs the plain bucket or object
+# operation, so these calls run as another operation and answer success.
+# An S3 implementation that lacks an API refuses it (501 NotImplemented),
+# and leaves the bucket and its objects as they were.
+
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+@pytest.mark.parametrize('op', ['delete_bucket_metrics_configuration',
+                                'delete_bucket_analytics_configuration',
+                                'delete_bucket_inventory_configuration',
+                                'delete_bucket_intelligent_tiering_configuration'])
+def test_bucket_config_delete_keeps_bucket(op):
+    # deleting a configuration the bucket does not have leaves the bucket
+    client = get_client()
+    bucket = get_new_bucket(client)
+    try:
+        getattr(client, op)(Bucket=bucket, Id='none')
+    except ClientError:
+        pass
+    client.head_bucket(Bucket=bucket)
+
+def _object_call_keeps_object(call):
+    client = get_client()
+    bucket = get_new_bucket(client)
+    key = 'obj'
+    client.put_object(Bucket=bucket, Key=key, Body='data')
+    try:
+        call(client, bucket, key)
+    except ClientError:
+        pass
+    assert _get_body(client.get_object(Bucket=bucket, Key=key)) == 'data'
+
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+def test_object_annotation_put_keeps_object():
+    _object_call_keeps_object(lambda c, b, k: c.put_object_annotation(
+        Bucket=b, Key=k, AnnotationName='note', AnnotationPayload=b'annotation'))
+
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+def test_object_annotation_delete_keeps_object():
+    _object_call_keeps_object(lambda c, b, k: c.delete_object_annotation(
+        Bucket=b, Key=k, AnnotationName='note'))
+
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+def test_update_object_encryption_keeps_data():
+    _object_call_keeps_object(lambda c, b, k: c.update_object_encryption(
+        Bucket=b, Key=k, ObjectEncryption={'SSEKMS': {'KMSKeyArn': 'arn:aws:kms:us-east-1:123456789012:key/test'}}))
+
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+def test_rename_object_keeps_destination():
+    # a rename either moves the source to the destination, or is refused
+    # and changes neither
+    client = get_client()
+    bucket = get_new_bucket(client)
+    client.put_object(Bucket=bucket, Key='src', Body='source')
+    client.put_object(Bucket=bucket, Key='dst', Body='destination')
+    try:
+        client.rename_object(Bucket=bucket, Key='dst', RenameSource=bucket + '/src')
+        renamed = True
+    except ClientError:
+        renamed = False
+    dst = _get_body(client.get_object(Bucket=bucket, Key='dst'))
+    if renamed:
+        assert dst == 'source'
+        e = assert_raises(ClientError, client.head_object, Bucket=bucket, Key='src')
+        assert 404 == _get_status(e.response)
+    else:
+        assert dst == 'destination'
+
+@pytest.mark.fails_on_rgw
+@pytest.mark.fails_on_dbstore
+def test_bucket_metrics_configuration_get_unconfigured():
+    # a bucket with no metrics configuration answers an error, not a listing
+    client = get_client()
+    bucket = get_new_bucket(client)
+    assert_raises(ClientError, client.get_bucket_metrics_configuration, Bucket=bucket, Id='none')
